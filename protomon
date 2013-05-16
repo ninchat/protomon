@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+
+# Copyright (c) 2013, Somia Reality Oy
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import argparse
+import io
+import struct
+import sys
+
+size_formats = {
+	1: b"<B",
+	2: b"<H",
+	4: b"<I",
+	8: b"<Q",
+}
+
+class EOF(Exception):
+
+	def __init__(self, ok=False):
+		super(EOF, self).__init__()
+		self.ok = ok
+
+def main():
+	parser = argparse.ArgumentParser()
+	parser.add_argument("file",                  metavar="FILE",  type=str)
+	parser.add_argument("-O", "--offset",        metavar="BYTES", type=int)
+	parser.add_argument("-S", "--size",          metavar="BYTES", type=int)
+	parser.add_argument("-H", "--size-header",   metavar="BYTES", type=int)
+	parser.add_argument("-m", "--message-field", metavar="NUM",   action="append", default=[])
+	args = parser.parse_args()
+
+	message_fields = set(int(x) for x in args.message_field)
+
+	file = open(args.file, "rb")
+
+	if args.offset:
+		file.seek(args.offset)
+
+	if args.size_header:
+		size, = struct.unpack(size_formats[args.size_header], file.read(args.size_header))
+		print("Size:  ", size)
+		print()
+	else:
+		size = args.size
+
+	if size is not None:
+		file = io.BytesIO(file.read(size))
+
+	dump_message(file, message_fields)
+
+def dump_message(file, message_fields, indent=""):
+	try:
+		while True:
+			key = read_varint(file, eof_ok=True)
+			field_num = key >> 3
+			type_id = key & 7
+			type_name = None
+			is_message = False
+
+			if type_id == 0:
+				type_name = "varint"
+			elif type_id == 1:
+				type_name = "64-bit"
+			elif type_id == 2:
+				is_message = field_num in message_fields
+				if is_message:
+					type_name = "message"
+				else:
+					type_name = "length-delimited"
+			elif type_id == 5:
+				type_name = "32-bit"
+			else:
+				type_name = "unknown ({})".format(type_id)
+
+			print(indent + "Field: ", field_num)
+			print(indent + "Type:  ", type_name)
+
+			if type_id == 0:
+				dump_varint(file, indent)
+			elif type_id == 1:
+				dump_64bit(file, indent)
+			elif type_id == 2:
+				if is_message:
+					dump_submessage(file, indent)
+				else:
+					dump_lengthdelimited(file, indent)
+			elif type_id == 5:
+				dump_32bit(file, indent)
+			else:
+				print(indent + "...")
+				print()
+				break
+
+	except EOF as e:
+		if not e.ok:
+			print(indent + "Unexpected EOF")
+			sys.exit(1)
+
+def dump_varint(file, indent):
+	print(indent + "Value: ", read_varint(file))
+	print()
+
+def dump_64bit(file, indent):
+	print(indent + "Value: ", read_64bit(file))
+	print()
+
+def dump_lengthdelimited(file, indent):
+	value = read_lengthdelimited(file)
+	print(indent + "Length:", len(value))
+	print(indent + "Repr:  ", repr(value))
+	print()
+
+def dump_submessage(file, indent):
+	value = read_lengthdelimited(file)
+	print(indent + "Length:", len(value))
+	dump_message(io.BytesIO(value), [], indent + "  ")
+
+def dump_32bit(file, indent):
+	print(indent + "Value: ", read_32bit(file))
+	print()
+
+def read_varint(file, eof_ok=False):
+	n = 1
+	x = 0
+	while True:
+		buf = file.read(1)
+		if not buf:
+			raise EOF(eof_ok)
+		v, = buf
+		x += (v & 127) * n
+		if v < 128:
+			break
+		n *= 128
+		eof_ok = False
+	return x
+
+def read_64bit(file):
+	x, = struct.unpack(b"<Q", file.read(8))
+	return x
+
+def read_lengthdelimited(file):
+	size = read_varint(file)
+	data = file.read(size)
+	if len(data) < size:
+		raise EOF()
+	return data
+
+def read_32bit(file):
+	x, = struct.unpack(b"<I", file.read(4))
+	return x
+
+if __name__ == "__main__":
+	main()
